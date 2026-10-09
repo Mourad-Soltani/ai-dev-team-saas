@@ -50,18 +50,20 @@ interface Settings {
   openrouterKey: string;
   openrouterModel: string;
   slackWebhook: string;
+  githubToken: string;
+  githubRepo: string;
 }
 
 function loadSettings(): Settings {
   if (typeof window === "undefined")
-    return { deepseekKey: "", openrouterKey: "", openrouterModel: "openai/gpt-4o-mini", slackWebhook: "" };
+    return { deepseekKey: "", openrouterKey: "", openrouterModel: "openai/gpt-4o-mini", slackWebhook: "", githubToken: "", githubRepo: "" };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
     return raw
       ? (JSON.parse(raw) as Settings)
       : { deepseekKey: "", openrouterKey: "", openrouterModel: "openai/gpt-4o-mini", slackWebhook: "" };
   } catch {
-    return { deepseekKey: "", openrouterKey: "", openrouterModel: "openai/gpt-4o-mini", slackWebhook: "" };
+    return { deepseekKey: "", openrouterKey: "", openrouterModel: "openai/gpt-4o-mini", slackWebhook: "", githubToken: "", githubRepo: "" };
   }
 }
 
@@ -70,6 +72,7 @@ export default function Home() {
   const [stepsText, setStepsText] = useState(DEFAULT_STEPS.join("\n"));
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<RunResult | null>(null);
+  const [runId, setRunId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [deciding, setDeciding] = useState<string | null>(null);
   const [planId, setPlanId] = useState<PlanId>("free");
@@ -82,6 +85,8 @@ export default function Home() {
     openrouterKey: "",
     openrouterModel: "openai/gpt-4o-mini",
     slackWebhook: "",
+    githubToken: "",
+    githubRepo: "",
   });
   const [banner, setBanner] = useState<string | null>(null);
 
@@ -91,6 +96,9 @@ export default function Home() {
     setUsage(getUsage());
     setHistory(loadHistory());
     setSettings(loadSettings());
+    if (!localStorage.getItem("ai-dev-team-anon")) {
+      localStorage.setItem("ai-dev-team-anon", "anon_" + Math.random().toString(36).slice(2));
+    }
     const stored = localStorage.getItem("ai-dev-team-plan");
     if (stored === "pro" || stored === "team") setPlanId(stored);
 
@@ -143,6 +151,8 @@ export default function Home() {
           openrouterKey: settings.openrouterKey || undefined,
           openrouterModel: settings.openrouterModel || undefined,
           slackWebhook: settings.slackWebhook || undefined,
+          anonKey: typeof window !== "undefined" ? localStorage.getItem("ai-dev-team-anon") : undefined,
+          planId,
         }),
       });
       const data = await res.json();
@@ -153,6 +163,7 @@ export default function Home() {
         humanDecision: null,
       }));
       setResult(data);
+      setRunId(data.runId || null);
 
       const nextUsage = incrementUsage();
       setUsage(nextUsage);
@@ -236,6 +247,9 @@ export default function Home() {
           description: result.outcomes.find((o) => o.stepId === stepId)
             ?.description,
           slackWebhook: settings.slackWebhook || undefined,
+          runId,
+          githubToken: settings.githubToken || undefined,
+          githubRepo: settings.githubRepo || undefined,
         }),
       });
     } catch {
@@ -310,6 +324,12 @@ export default function Home() {
             >
               Settings
             </button>
+            <Link
+              href="/inbox"
+              className="rounded-full bg-slate-800 px-2.5 py-1 text-slate-300 hover:bg-slate-700"
+            >
+              Inbox
+            </Link>
             <Link
               href="/pricing"
               className="rounded-full bg-sky-500/15 text-sky-400 px-2.5 py-1 font-medium hover:bg-sky-500/25 transition"
@@ -412,6 +432,34 @@ export default function Home() {
                 saveSettings({ ...settings, slackWebhook: e.target.value })
               }
               placeholder="https://hooks.slack.com/services/..."
+              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm font-mono"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1">
+              GitHub token (optional — create issue on Approve)
+            </label>
+            <input
+              type="password"
+              value={settings.githubToken}
+              onChange={(e) =>
+                saveSettings({ ...settings, githubToken: e.target.value })
+              }
+              placeholder="ghp_... or github_pat_..."
+              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm font-mono"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1">
+              GitHub repo (owner/name)
+            </label>
+            <input
+              type="text"
+              value={settings.githubRepo}
+              onChange={(e) =>
+                saveSettings({ ...settings, githubRepo: e.target.value })
+              }
+              placeholder="Mourad-Soltani/ai-dev-team-saas"
               className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm font-mono"
             />
           </div>

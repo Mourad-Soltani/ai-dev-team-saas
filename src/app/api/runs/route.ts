@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { runOrchestration } from "@/lib/orchestrator";
 import { enrichLiveAgents } from "@/lib/liveAgents";
 import { notifySlack } from "@/lib/notify";
+import { saveRun } from "@/lib/persist";
+import { checkAndIncrementUsage } from "@/lib/limits";
+import type { PlanId } from "@/lib/plans";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -17,11 +20,26 @@ export async function POST(req: NextRequest) {
     const openrouterModel =
       (body.openrouterModel as string) || "openai/gpt-4o-mini";
     const slackWebhook = (body.slackWebhook as string) || "";
+    const userId = (body.userId as string) || "";
+    const planId = ((body.planId as string) || "free") as PlanId;
+    const userKey =
+      userId ||
+      (body.anonKey as string) ||
+      req.headers.get("x-forwarded-for") ||
+      "anon";
 
     if (!rawSteps.length) {
       return NextResponse.json(
         { error: "Provide at least one step" },
         { status: 400 }
+      );
+    }
+
+    const usage = await checkAndIncrementUsage(userKey, planId);
+    if (!usage.allowed) {
+      return NextResponse.json(
+        { error: usage.error || "Run limit reached", usage },
+        { status: 429 }
       );
     }
 
@@ -66,6 +84,21 @@ export async function POST(req: NextRequest) {
       outcomes = enriched;
     }
 
+    const summary = {
+      total: outcomes.length,
+      autoExecuted: outcomes.filter((o) => o.executed).length,
+      escalated: outcomes.filter((o) => !o.executed).length,
+    };
+
+    const runId = await saveRun({
+      userId: userId || null,
+      goal,
+      liveModel,
+      liveProvider,
+      summary,
+      outcomes,
+    });
+
     const escalated = outcomes.filter((o) => !o.executed);
     if (slackWebhook && escalated.length) {
       const lines = escalated
@@ -79,14 +112,12 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       goal,
+      runId,
       outcomes,
       liveModel,
       liveProvider,
-      summary: {
-        total: outcomes.length,
-        autoExecuted: outcomes.filter((o) => o.executed).length,
-        escalated: outcomes.filter((o) => !o.executed).length,
-      },
+      summary,
+      usage: { runs: usage.runs, limit: usage.limit },
     });
   } catch (e) {
     return NextResponse.json(

@@ -2,11 +2,11 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
 /**
- * Auth middleware.
- * When Clerk keys are present, Clerk protects checkout paths.
- * When keys are missing (demo mode), all routes stay public.
+ * Auth middleware placeholder.
+ * When Clerk keys are configured, replace with clerkMiddleware() from @clerk/nextjs/server
+ * to protect /inbox and /api/* as needed.
  */
-export function middleware(req: NextRequest) {
+export function middleware(_req: NextRequest) {
   return NextResponse.next();
 }
 
