@@ -1,20 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
+import { notifySlack } from "@/lib/notify";
 
-export const runtime = "edge";
+export const runtime = "nodejs";
 
-/**
- * Records human decisions on escalated steps.
- * Edge-safe: no durable store yet — logs and returns confirmation.
- * Swap for Vercel KV / Postgres when auth lands.
- */
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { goal, stepId, decision, description } = body as {
+    const { goal, stepId, decision, description, slackWebhook } = body as {
       goal?: string;
       stepId?: string;
       decision?: "approved" | "rejected";
       description?: string;
+      slackWebhook?: string;
     };
 
     if (!stepId || !decision || !["approved", "rejected"].includes(decision)) {
@@ -32,8 +29,15 @@ export async function POST(req: NextRequest) {
       decidedAt: new Date().toISOString(),
     };
 
-    // Structured log for Vercel dashboard / future persistence hook
     console.log("[human-decision]", JSON.stringify(record));
+
+    if (slackWebhook) {
+      const emoji = decision === "approved" ? "✅" : "🛑";
+      await notifySlack(
+        slackWebhook,
+        `${emoji} *Human ${decision}* — ${description || stepId}\nGoal: ${goal || "—"}`
+      );
+    }
 
     return NextResponse.json({ ok: true, record });
   } catch (e) {

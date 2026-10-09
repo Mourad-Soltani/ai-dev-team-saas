@@ -33,6 +33,7 @@ interface RunResult {
   goal: string;
   outcomes: StepOutcome[];
   summary: { total: number; autoExecuted: number; escalated: number };
+  liveModel?: boolean;
 }
 
 const DEFAULT_STEPS = [
@@ -40,6 +41,26 @@ const DEFAULT_STEPS = [
   "Add a config flag for the new feature",
   "Deploy the updated auth service to production",
 ];
+
+const SETTINGS_KEY = "ai-dev-team-settings";
+
+interface Settings {
+  deepseekKey: string;
+  slackWebhook: string;
+}
+
+function loadSettings(): Settings {
+  if (typeof window === "undefined")
+    return { deepseekKey: "", slackWebhook: "" };
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    return raw
+      ? (JSON.parse(raw) as Settings)
+      : { deepseekKey: "", slackWebhook: "" };
+  } catch {
+    return { deepseekKey: "", slackWebhook: "" };
+  }
+}
 
 export default function Home() {
   const [goal, setGoal] = useState("Ship the parser feature");
@@ -52,6 +73,11 @@ export default function Home() {
   const [usage, setUsage] = useState({ date: "", runs: 0 });
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [showHistory, setShowHistory] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [settings, setSettings] = useState<Settings>({
+    deepseekKey: "",
+    slackWebhook: "",
+  });
   const [banner, setBanner] = useState<string | null>(null);
 
   const plan = getPlan(planId);
@@ -59,7 +85,7 @@ export default function Home() {
   useEffect(() => {
     setUsage(getUsage());
     setHistory(loadHistory());
-    // Restore plan from localStorage (set after successful checkout)
+    setSettings(loadSettings());
     const stored = localStorage.getItem("ai-dev-team-plan");
     if (stored === "pro" || stored === "team") setPlanId(stored);
 
@@ -69,10 +95,17 @@ export default function Home() {
       if (p === "pro" || p === "team") {
         localStorage.setItem("ai-dev-team-plan", p);
         setPlanId(p);
-        setBanner(`Welcome to ${p === "pro" ? "Pro" : "Team"}! Unlimited runs unlocked.`);
+        setBanner(
+          `Welcome to ${p === "pro" ? "Pro" : "Team"}! Unlimited runs unlocked.`
+        );
       }
     }
   }, []);
+
+  function saveSettings(next: Settings) {
+    setSettings(next);
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(next));
+  }
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -98,7 +131,12 @@ export default function Home() {
       const res = await fetch("/api/runs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ goal, steps }),
+        body: JSON.stringify({
+          goal,
+          steps,
+          deepseekKey: settings.deepseekKey || undefined,
+          slackWebhook: settings.slackWebhook || undefined,
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Request failed");
@@ -118,8 +156,10 @@ export default function Home() {
         createdAt: new Date().toISOString(),
         summary: {
           total: data.outcomes.length,
-          executed: data.outcomes.filter((o: StepOutcome) => o.executed).length,
-          escalated: data.outcomes.filter((o: StepOutcome) => !o.executed).length,
+          executed: data.outcomes.filter((o: StepOutcome) => o.executed)
+            .length,
+          escalated: data.outcomes.filter((o: StepOutcome) => !o.executed)
+            .length,
         },
         outcomes: data.outcomes.map((o: StepOutcome) => ({
           stepId: o.stepId,
@@ -132,6 +172,10 @@ export default function Home() {
       };
       saveRun(entry);
       setHistory(loadHistory());
+
+      if (data.liveModel) {
+        setBanner("Live DeepSeek rationales active for this run.");
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
     } finally {
@@ -183,6 +227,7 @@ export default function Home() {
           decision,
           description: result.outcomes.find((o) => o.stepId === stepId)
             ?.description,
+          slackWebhook: settings.slackWebhook || undefined,
         }),
       });
     } catch {
@@ -190,6 +235,38 @@ export default function Home() {
     } finally {
       setDeciding(null);
     }
+  }
+
+  function exportAuditLog() {
+    if (!result) return;
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      goal: result.goal,
+      liveModel: result.liveModel || false,
+      summary: result.summary,
+      outcomes: result.outcomes.map((o) => ({
+        stepId: o.stepId,
+        description: o.description,
+        gateDecision: o.gateDecision,
+        riskLevel: o.riskLevel,
+        riskScore: o.riskScore,
+        confidence: o.confidence,
+        executed: o.executed,
+        humanDecision: o.humanDecision || null,
+        decidedAt: o.decidedAt || null,
+        note: o.note,
+        agents: o.agents,
+      })),
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `audit-${result.goal.replace(/\s+/g, "-").slice(0, 40)}-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   const pendingEscalations =
@@ -218,6 +295,13 @@ export default function Home() {
                 </span>
               )}
             </span>
+            <button
+              type="button"
+              onClick={() => setShowSettings((v) => !v)}
+              className="rounded-full bg-slate-800 px-2.5 py-1 text-slate-300 hover:bg-slate-700"
+            >
+              Settings
+            </button>
             <Link
               href="/pricing"
               className="rounded-full bg-sky-500/15 text-sky-400 px-2.5 py-1 font-medium hover:bg-sky-500/25 transition"
@@ -230,16 +314,66 @@ export default function Home() {
           Multi-agent orchestration with risk gates
         </h1>
         <p className="text-slate-400 leading-relaxed">
-          Submit a development goal. Six specialized agents reach consensus,
-          score risk, and either auto-execute safe steps or escalate dangerous
-          ones for your sign-off.
+          Submit a goal. Agents reach consensus, score risk, auto-execute safe
+          steps, and escalate dangerous ones for your sign-off.
+          {settings.deepseekKey && (
+            <span className="text-emerald-400/90">
+              {" "}
+              Live DeepSeek key configured.
+            </span>
+          )}
         </p>
       </header>
 
       {banner && (
-        <div className="mb-6 rounded-lg border border-emerald-900/50 bg-emerald-950/40 px-4 py-3 text-emerald-300 text-sm">
-          {banner}
+        <div className="mb-6 rounded-lg border border-emerald-900/50 bg-emerald-950/40 px-4 py-3 text-emerald-300 text-sm flex justify-between gap-2">
+          <span>{banner}</span>
+          <button
+            type="button"
+            className="text-emerald-500/80 hover:text-emerald-300"
+            onClick={() => setBanner(null)}
+          >
+            ✕
+          </button>
         </div>
+      )}
+
+      {showSettings && (
+        <section className="mb-6 rounded-xl border border-slate-700 bg-slate-900 p-5 space-y-4">
+          <h3 className="text-sm font-semibold text-slate-200">Settings</h3>
+          <p className="text-xs text-slate-500">
+            Stored only in your browser. Keys are sent to the API for your runs
+            and never written to our database.
+          </p>
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1">
+              DeepSeek API key (optional — live agent rationales)
+            </label>
+            <input
+              type="password"
+              value={settings.deepseekKey}
+              onChange={(e) =>
+                saveSettings({ ...settings, deepseekKey: e.target.value })
+              }
+              placeholder="sk-..."
+              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm font-mono"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1">
+              Slack incoming webhook (optional — escalation alerts)
+            </label>
+            <input
+              type="url"
+              value={settings.slackWebhook}
+              onChange={(e) =>
+                saveSettings({ ...settings, slackWebhook: e.target.value })
+              }
+              placeholder="https://hooks.slack.com/services/..."
+              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm font-mono"
+            />
+          </div>
+        </section>
       )}
 
       <form
@@ -254,7 +388,6 @@ export default function Home() {
             value={goal}
             onChange={(e) => setGoal(e.target.value)}
             className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
-            placeholder="e.g. Ship the invoice PDF export"
           />
         </div>
         <div>
@@ -274,7 +407,11 @@ export default function Home() {
             disabled={loading}
             className="rounded-lg bg-sky-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-sky-400 disabled:opacity-50 transition"
           >
-            {loading ? "Running agents…" : "Run AI Dev Team"}
+            {loading
+              ? settings.deepseekKey
+                ? "Calling DeepSeek…"
+                : "Running agents…"
+              : "Run AI Dev Team"}
           </button>
           <button
             type="button"
@@ -283,6 +420,15 @@ export default function Home() {
           >
             {showHistory ? "Hide history" : `History (${history.length})`}
           </button>
+          {result && (
+            <button
+              type="button"
+              onClick={exportAuditLog}
+              className="text-sm text-slate-400 hover:text-slate-200"
+            >
+              Export audit log
+            </button>
+          )}
         </div>
       </form>
 
@@ -333,13 +479,9 @@ export default function Home() {
                 {pendingEscalations} awaiting your decision
               </span>
             )}
-            {result.outcomes.some((o) => o.humanDecision === "rejected") && (
-              <span className="rounded-full bg-red-950 text-red-300 px-3 py-1">
-                {
-                  result.outcomes.filter((o) => o.humanDecision === "rejected")
-                    .length
-                }{" "}
-                rejected
+            {result.liveModel && (
+              <span className="rounded-full bg-violet-950 text-violet-300 px-3 py-1">
+                Live DeepSeek
               </span>
             )}
           </div>
@@ -375,7 +517,7 @@ export default function Home() {
                         type="button"
                         disabled={deciding === o.stepId}
                         onClick={() => handleDecision(o.stepId, "approved")}
-                        className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50 transition"
+                        className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
                       >
                         {deciding === o.stepId ? "…" : "Approve"}
                       </button>
@@ -383,7 +525,7 @@ export default function Home() {
                         type="button"
                         disabled={deciding === o.stepId}
                         onClick={() => handleDecision(o.stepId, "rejected")}
-                        className="rounded-lg bg-red-600/80 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-500 disabled:opacity-50 transition"
+                        className="rounded-lg bg-red-600/80 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-500 disabled:opacity-50"
                       >
                         {deciding === o.stepId ? "…" : "Reject"}
                       </button>
@@ -400,11 +542,17 @@ export default function Home() {
                   <summary className="cursor-pointer hover:text-slate-300">
                     Agent opinions ({o.agents.length})
                   </summary>
-                  <ul className="mt-2 space-y-1 pl-2 border-l border-slate-800">
+                  <ul className="mt-2 space-y-1.5 pl-2 border-l border-slate-800">
                     {o.agents.map((a) => (
                       <li key={a.agent}>
                         <span className="text-slate-400">{a.agent}</span>:{" "}
                         {a.verdict} ({(a.confidence * 100).toFixed(0)}%)
+                        {a.rationale && (
+                          <span className="text-slate-600">
+                            {" "}
+                            — {a.rationale}
+                          </span>
+                        )}
                       </li>
                     ))}
                   </ul>
@@ -417,7 +565,8 @@ export default function Home() {
 
       <footer className="mt-16 pt-8 border-t border-slate-800 text-xs text-slate-500 flex flex-wrap justify-between gap-2">
         <p>
-          High-risk steps always need human sign-off. Safe steps auto-execute.
+          High-risk steps need human sign-off. Optional live DeepSeek + Slack in
+          Settings.
         </p>
         <Link href="/pricing" className="text-sky-500 hover:text-sky-400">
           Pricing
@@ -446,13 +595,6 @@ function StatusBadge({ outcome }: { outcome: StepOutcome }) {
     return (
       <span className="shrink-0 rounded-md bg-red-500/15 text-red-400 px-2 py-0.5 text-xs font-medium">
         REJECTED
-      </span>
-    );
-  }
-  if (outcome.gateDecision === "blocked") {
-    return (
-      <span className="shrink-0 rounded-md bg-red-500/15 text-red-400 px-2 py-0.5 text-xs font-medium">
-        BLOCKED
       </span>
     );
   }
