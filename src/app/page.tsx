@@ -9,6 +9,8 @@ interface AgentOpinion {
   rationale: string;
 }
 
+type HumanDecision = "approved" | "rejected" | null;
+
 interface StepOutcome {
   stepId: string;
   description: string;
@@ -19,6 +21,8 @@ interface StepOutcome {
   executed: boolean;
   note: string;
   agents: AgentOpinion[];
+  humanDecision?: HumanDecision;
+  decidedAt?: string;
 }
 
 interface RunResult {
@@ -39,6 +43,7 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<RunResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [deciding, setDeciding] = useState<string | null>(null);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -60,6 +65,11 @@ export default function Home() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Request failed");
+      // Attach humanDecision: null for escalated steps
+      data.outcomes = data.outcomes.map((o: StepOutcome) => ({
+        ...o,
+        humanDecision: o.executed ? null : null,
+      }));
       setResult(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
@@ -67,6 +77,62 @@ export default function Home() {
       setLoading(false);
     }
   }
+
+  async function handleDecision(stepId: string, decision: "approved" | "rejected") {
+    if (!result) return;
+    setDeciding(stepId);
+
+    // Optimistic UI update
+    const updated = {
+      ...result,
+      outcomes: result.outcomes.map((o) =>
+        o.stepId === stepId
+          ? {
+              ...o,
+              humanDecision: decision,
+              decidedAt: new Date().toISOString(),
+              executed: decision === "approved",
+              note:
+                decision === "approved"
+                  ? "Human approved — step marked executed"
+                  : "Human rejected — step blocked",
+            }
+          : o
+      ),
+    };
+    // Recompute summary
+    updated.summary = {
+      total: updated.outcomes.length,
+      autoExecuted: updated.outcomes.filter((o) => o.executed).length,
+      escalated: updated.outcomes.filter(
+        (o) => !o.executed && o.humanDecision !== "rejected"
+      ).length,
+    };
+    setResult(updated);
+
+    try {
+      await fetch("/api/decisions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          goal: result.goal,
+          stepId,
+          decision,
+          description: result.outcomes.find((o) => o.stepId === stepId)
+            ?.description,
+        }),
+      });
+    } catch {
+      // Non-blocking — UI already updated
+    } finally {
+      setDeciding(null);
+    }
+  }
+
+  const pendingEscalations =
+    result?.outcomes.filter(
+      (o) => !o.executed && o.gateDecision === "needs_human" && !o.humanDecision
+    ).length ?? 0;
 
   return (
     <main className="mx-auto max-w-3xl px-4 py-12">
@@ -131,15 +197,27 @@ export default function Home() {
               {result.summary.total} steps
             </span>
             <span className="rounded-full bg-emerald-950 text-emerald-300 px-3 py-1">
-              {result.summary.autoExecuted} auto-executed
+              {result.outcomes.filter((o) => o.executed).length} executed
             </span>
-            <span className="rounded-full bg-amber-950 text-amber-300 px-3 py-1">
-              {result.summary.escalated} escalated
-            </span>
+            {pendingEscalations > 0 && (
+              <span className="rounded-full bg-amber-950 text-amber-300 px-3 py-1">
+                {pendingEscalations} awaiting your decision
+              </span>
+            )}
+            {result.outcomes.some((o) => o.humanDecision === "rejected") && (
+              <span className="rounded-full bg-red-950 text-red-300 px-3 py-1">
+                {
+                  result.outcomes.filter((o) => o.humanDecision === "rejected")
+                    .length
+                }{" "}
+                rejected
+              </span>
+            )}
           </div>
 
           <h2 className="text-lg font-semibold">
-            Goal: <span className="text-slate-300 font-normal">{result.goal}</span>
+            Goal:{" "}
+            <span className="text-slate-300 font-normal">{result.goal}</span>
           </h2>
 
           <ul className="space-y-4">
@@ -150,16 +228,46 @@ export default function Home() {
               >
                 <div className="flex flex-wrap items-start justify-between gap-2 mb-2">
                   <p className="font-medium">{o.description}</p>
-                  <StatusBadge executed={o.executed} decision={o.gateDecision} />
+                  <StatusBadge outcome={o} />
                 </div>
                 <div className="flex flex-wrap gap-3 text-xs text-slate-400 mb-3">
                   <span>
-                    Risk:{" "}
-                    <RiskBadge level={o.riskLevel} score={o.riskScore} />
+                    Risk: <RiskBadge level={o.riskLevel} score={o.riskScore} />
                   </span>
                   <span>Confidence: {(o.confidence * 100).toFixed(0)}%</span>
                 </div>
                 <p className="text-sm text-slate-400 mb-3">{o.note}</p>
+
+                {/* Approve / Reject for pending escalations */}
+                {!o.executed &&
+                  o.gateDecision === "needs_human" &&
+                  !o.humanDecision && (
+                    <div className="flex flex-wrap gap-2 mb-3">
+                      <button
+                        type="button"
+                        disabled={deciding === o.stepId}
+                        onClick={() => handleDecision(o.stepId, "approved")}
+                        className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50 transition"
+                      >
+                        {deciding === o.stepId ? "…" : "Approve"}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={deciding === o.stepId}
+                        onClick={() => handleDecision(o.stepId, "rejected")}
+                        className="rounded-lg bg-red-600/80 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-500 disabled:opacity-50 transition"
+                      >
+                        {deciding === o.stepId ? "…" : "Reject"}
+                      </button>
+                    </div>
+                  )}
+
+                {o.humanDecision && o.decidedAt && (
+                  <p className="text-xs text-slate-500 mb-2">
+                    Decided {new Date(o.decidedAt).toLocaleString()}
+                  </p>
+                )}
+
                 <details className="text-xs text-slate-500">
                   <summary className="cursor-pointer hover:text-slate-300">
                     Agent opinions ({o.agents.length})
@@ -190,21 +298,22 @@ export default function Home() {
   );
 }
 
-function StatusBadge({
-  executed,
-  decision,
-}: {
-  executed: boolean;
-  decision: string;
-}) {
-  if (executed) {
+function StatusBadge({ outcome }: { outcome: StepOutcome }) {
+  if (outcome.humanDecision === "approved" || (outcome.executed && !outcome.humanDecision && outcome.gateDecision === "auto_approve")) {
     return (
       <span className="shrink-0 rounded-md bg-emerald-500/15 text-emerald-400 px-2 py-0.5 text-xs font-medium">
-        AUTO-EXECUTED
+        {outcome.humanDecision === "approved" ? "HUMAN APPROVED" : "AUTO-EXECUTED"}
       </span>
     );
   }
-  if (decision === "blocked") {
+  if (outcome.humanDecision === "rejected") {
+    return (
+      <span className="shrink-0 rounded-md bg-red-500/15 text-red-400 px-2 py-0.5 text-xs font-medium">
+        REJECTED
+      </span>
+    );
+  }
+  if (outcome.gateDecision === "blocked") {
     return (
       <span className="shrink-0 rounded-md bg-red-500/15 text-red-400 px-2 py-0.5 text-xs font-medium">
         BLOCKED
@@ -213,7 +322,7 @@ function StatusBadge({
   }
   return (
     <span className="shrink-0 rounded-md bg-amber-500/15 text-amber-400 px-2 py-0.5 text-xs font-medium">
-      ESCALATED TO HUMAN
+      AWAITING YOUR DECISION
     </span>
   );
 }
