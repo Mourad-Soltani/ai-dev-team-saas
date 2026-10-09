@@ -1,6 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import { getPlan, type PlanId } from "@/lib/plans";
+import { canRun, getUsage, incrementUsage } from "@/lib/usage";
+import { loadHistory, saveRun, type HistoryEntry } from "@/lib/history";
 
 interface AgentOpinion {
   agent: string;
@@ -44,11 +48,44 @@ export default function Home() {
   const [result, setResult] = useState<RunResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [deciding, setDeciding] = useState<string | null>(null);
+  const [planId, setPlanId] = useState<PlanId>("free");
+  const [usage, setUsage] = useState({ date: "", runs: 0 });
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const [banner, setBanner] = useState<string | null>(null);
+
+  const plan = getPlan(planId);
+
+  useEffect(() => {
+    setUsage(getUsage());
+    setHistory(loadHistory());
+    // Restore plan from localStorage (set after successful checkout)
+    const stored = localStorage.getItem("ai-dev-team-plan");
+    if (stored === "pro" || stored === "team") setPlanId(stored);
+
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("checkout") === "success") {
+      const p = params.get("plan");
+      if (p === "pro" || p === "team") {
+        localStorage.setItem("ai-dev-team-plan", p);
+        setPlanId(p);
+        setBanner(`Welcome to ${p === "pro" ? "Pro" : "Team"}! Unlimited runs unlocked.`);
+      }
+    }
+  }, []);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
-    setLoading(true);
     setError(null);
+
+    if (!canRun(plan.runsPerDay)) {
+      setError(
+        `Free plan limit reached (${plan.runsPerDay} runs/day). Upgrade to Pro for unlimited runs.`
+      );
+      return;
+    }
+
+    setLoading(true);
     setResult(null);
 
     const steps = stepsText
@@ -65,12 +102,36 @@ export default function Home() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Request failed");
-      // Attach humanDecision: null for escalated steps
+
       data.outcomes = data.outcomes.map((o: StepOutcome) => ({
         ...o,
-        humanDecision: o.executed ? null : null,
+        humanDecision: null,
       }));
       setResult(data);
+
+      const nextUsage = incrementUsage();
+      setUsage(nextUsage);
+
+      const entry: HistoryEntry = {
+        id: `run_${Date.now()}`,
+        goal: data.goal,
+        createdAt: new Date().toISOString(),
+        summary: {
+          total: data.outcomes.length,
+          executed: data.outcomes.filter((o: StepOutcome) => o.executed).length,
+          escalated: data.outcomes.filter((o: StepOutcome) => !o.executed).length,
+        },
+        outcomes: data.outcomes.map((o: StepOutcome) => ({
+          stepId: o.stepId,
+          description: o.description,
+          gateDecision: o.gateDecision,
+          riskLevel: o.riskLevel,
+          executed: o.executed,
+          humanDecision: null,
+        })),
+      };
+      saveRun(entry);
+      setHistory(loadHistory());
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
     } finally {
@@ -78,12 +139,14 @@ export default function Home() {
     }
   }
 
-  async function handleDecision(stepId: string, decision: "approved" | "rejected") {
+  async function handleDecision(
+    stepId: string,
+    decision: "approved" | "rejected"
+  ) {
     if (!result) return;
     setDeciding(stepId);
 
-    // Optimistic UI update
-    const updated = {
+    const updated: RunResult = {
       ...result,
       outcomes: result.outcomes.map((o) =>
         o.stepId === stepId
@@ -99,8 +162,8 @@ export default function Home() {
             }
           : o
       ),
+      summary: result.summary,
     };
-    // Recompute summary
     updated.summary = {
       total: updated.outcomes.length,
       autoExecuted: updated.outcomes.filter((o) => o.executed).length,
@@ -123,7 +186,7 @@ export default function Home() {
         }),
       });
     } catch {
-      // Non-blocking — UI already updated
+      /* non-blocking */
     } finally {
       setDeciding(null);
     }
@@ -131,23 +194,53 @@ export default function Home() {
 
   const pendingEscalations =
     result?.outcomes.filter(
-      (o) => !o.executed && o.gateDecision === "needs_human" && !o.humanDecision
+      (o) =>
+        !o.executed && o.gateDecision === "needs_human" && !o.humanDecision
     ).length ?? 0;
+
+  const runsLeft =
+    plan.runsPerDay < 0
+      ? "Unlimited"
+      : Math.max(0, plan.runsPerDay - usage.runs);
 
   return (
     <main className="mx-auto max-w-3xl px-4 py-12">
-      <header className="mb-10">
-        <p className="text-sm font-medium text-sky-400 mb-2">AI Dev Team SaaS</p>
+      <header className="mb-8">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+          <p className="text-sm font-medium text-sky-400">AI Dev Team SaaS</p>
+          <div className="flex items-center gap-2 text-xs">
+            <span className="rounded-full bg-slate-800 px-2.5 py-1 text-slate-300">
+              {plan.name}
+              {plan.runsPerDay >= 0 && (
+                <span className="text-slate-500">
+                  {" "}
+                  · {runsLeft} runs left today
+                </span>
+              )}
+            </span>
+            <Link
+              href="/pricing"
+              className="rounded-full bg-sky-500/15 text-sky-400 px-2.5 py-1 font-medium hover:bg-sky-500/25 transition"
+            >
+              Upgrade
+            </Link>
+          </div>
+        </div>
         <h1 className="text-3xl font-bold tracking-tight mb-3">
           Multi-agent orchestration with risk gates
         </h1>
         <p className="text-slate-400 leading-relaxed">
-          Submit a development goal. Six specialized agents (PM, Architect,
-          Backend, Frontend, QA, Reviewer) reach consensus, score risk, and
-          either auto-execute safe steps or escalate dangerous ones for human
-          sign-off.
+          Submit a development goal. Six specialized agents reach consensus,
+          score risk, and either auto-execute safe steps or escalate dangerous
+          ones for your sign-off.
         </p>
       </header>
+
+      {banner && (
+        <div className="mb-6 rounded-lg border border-emerald-900/50 bg-emerald-950/40 px-4 py-3 text-emerald-300 text-sm">
+          {banner}
+        </div>
+      )}
 
       <form
         onSubmit={onSubmit}
@@ -175,19 +268,55 @@ export default function Home() {
             className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-sky-500"
           />
         </div>
-        <button
-          type="submit"
-          disabled={loading}
-          className="rounded-lg bg-sky-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-sky-400 disabled:opacity-50 transition"
-        >
-          {loading ? "Running agents…" : "Run AI Dev Team"}
-        </button>
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="submit"
+            disabled={loading}
+            className="rounded-lg bg-sky-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-sky-400 disabled:opacity-50 transition"
+          >
+            {loading ? "Running agents…" : "Run AI Dev Team"}
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowHistory((v) => !v)}
+            className="text-sm text-slate-400 hover:text-slate-200"
+          >
+            {showHistory ? "Hide history" : `History (${history.length})`}
+          </button>
+        </div>
       </form>
 
       {error && (
         <div className="rounded-lg border border-red-900/50 bg-red-950/40 px-4 py-3 text-red-300 text-sm mb-6">
-          {error}
+          {error}{" "}
+          {error.includes("Upgrade") && (
+            <Link href="/pricing" className="underline text-sky-400">
+              View plans
+            </Link>
+          )}
         </div>
+      )}
+
+      {showHistory && history.length > 0 && (
+        <section className="mb-8 rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+          <h3 className="text-sm font-semibold mb-3 text-slate-300">
+            Recent runs
+          </h3>
+          <ul className="space-y-2 text-sm">
+            {history.slice(0, 10).map((h) => (
+              <li
+                key={h.id}
+                className="flex flex-wrap justify-between gap-2 text-slate-400 border-b border-slate-800/80 pb-2"
+              >
+                <span className="text-slate-200">{h.goal}</span>
+                <span className="text-xs">
+                  {h.summary.executed}/{h.summary.total} executed ·{" "}
+                  {new Date(h.createdAt).toLocaleString()}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </section>
       )}
 
       {result && (
@@ -238,7 +367,6 @@ export default function Home() {
                 </div>
                 <p className="text-sm text-slate-400 mb-3">{o.note}</p>
 
-                {/* Approve / Reject for pending escalations */}
                 {!o.executed &&
                   o.gateDecision === "needs_human" &&
                   !o.humanDecision && (
@@ -287,22 +415,30 @@ export default function Home() {
         </section>
       )}
 
-      <footer className="mt-16 pt-8 border-t border-slate-800 text-xs text-slate-500">
+      <footer className="mt-16 pt-8 border-t border-slate-800 text-xs text-slate-500 flex flex-wrap justify-between gap-2">
         <p>
-          Prototype SaaS powered by the AI Dev Team orchestration engine.
-          High-risk steps (production deploys, auth, billing, irreversible
-          actions) always require human sign-off. Safe steps auto-execute.
+          High-risk steps always need human sign-off. Safe steps auto-execute.
         </p>
+        <Link href="/pricing" className="text-sky-500 hover:text-sky-400">
+          Pricing
+        </Link>
       </footer>
     </main>
   );
 }
 
 function StatusBadge({ outcome }: { outcome: StepOutcome }) {
-  if (outcome.humanDecision === "approved" || (outcome.executed && !outcome.humanDecision && outcome.gateDecision === "auto_approve")) {
+  if (
+    outcome.humanDecision === "approved" ||
+    (outcome.executed &&
+      !outcome.humanDecision &&
+      outcome.gateDecision === "auto_approve")
+  ) {
     return (
       <span className="shrink-0 rounded-md bg-emerald-500/15 text-emerald-400 px-2 py-0.5 text-xs font-medium">
-        {outcome.humanDecision === "approved" ? "HUMAN APPROVED" : "AUTO-EXECUTED"}
+        {outcome.humanDecision === "approved"
+          ? "HUMAN APPROVED"
+          : "AUTO-EXECUTED"}
       </span>
     );
   }
