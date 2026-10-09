@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { runOrchestration } from "@/lib/orchestrator";
-import { enrichWithDeepSeek } from "@/lib/deepseek";
+import { enrichLiveAgents } from "@/lib/liveAgents";
 import { notifySlack } from "@/lib/notify";
 
-export const runtime = "nodejs"; // need Node for longer DeepSeek calls
+export const runtime = "nodejs";
 export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
@@ -13,6 +13,9 @@ export async function POST(req: NextRequest) {
     const rawSteps =
       (body.steps as { id?: string; description: string }[]) || [];
     const deepseekKey = (body.deepseekKey as string) || "";
+    const openrouterKey = (body.openrouterKey as string) || "";
+    const openrouterModel =
+      (body.openrouterModel as string) || "openai/gpt-4o-mini";
     const slackWebhook = (body.slackWebhook as string) || "";
 
     if (!rawSteps.length) {
@@ -29,23 +32,31 @@ export async function POST(req: NextRequest) {
 
     let outcomes = runOrchestration(goal, steps);
     let liveModel = false;
+    let liveProvider: string = "none";
 
-    // Optional: enrich agent rationales with live DeepSeek
-    if (deepseekKey.startsWith("sk-")) {
+    const hasLiveKey =
+      (openrouterKey && openrouterKey.startsWith("sk-")) ||
+      (deepseekKey && deepseekKey.startsWith("sk-"));
+
+    if (hasLiveKey) {
       const enriched = [];
       for (const o of outcomes) {
-        const live = await enrichWithDeepSeek(
-          deepseekKey,
+        const live = await enrichLiveAgents({
           goal,
-          o.description
-        );
-        if (live && live.length) {
+          stepDescription: o.description,
+          openrouterKey,
+          openrouterModel,
+          deepseekKey,
+        });
+        if (live) {
           liveModel = true;
+          liveProvider = live.provider;
           const avg =
-            live.reduce((s, x) => s + x.confidence, 0) / live.length;
+            live.opinions.reduce((s, x) => s + x.confidence, 0) /
+            live.opinions.length;
           enriched.push({
             ...o,
-            agents: live,
+            agents: live.opinions,
             confidence: avg,
           });
         } else {
@@ -55,7 +66,6 @@ export async function POST(req: NextRequest) {
       outcomes = enriched;
     }
 
-    // Slack: notify on escalations
     const escalated = outcomes.filter((o) => !o.executed);
     if (slackWebhook && escalated.length) {
       const lines = escalated
@@ -71,6 +81,7 @@ export async function POST(req: NextRequest) {
       goal,
       outcomes,
       liveModel,
+      liveProvider,
       summary: {
         total: outcomes.length,
         autoExecuted: outcomes.filter((o) => o.executed).length,

@@ -34,6 +34,7 @@ interface RunResult {
   outcomes: StepOutcome[];
   summary: { total: number; autoExecuted: number; escalated: number };
   liveModel?: boolean;
+  liveProvider?: string;
 }
 
 const DEFAULT_STEPS = [
@@ -46,19 +47,21 @@ const SETTINGS_KEY = "ai-dev-team-settings";
 
 interface Settings {
   deepseekKey: string;
+  openrouterKey: string;
+  openrouterModel: string;
   slackWebhook: string;
 }
 
 function loadSettings(): Settings {
   if (typeof window === "undefined")
-    return { deepseekKey: "", slackWebhook: "" };
+    return { deepseekKey: "", openrouterKey: "", openrouterModel: "openai/gpt-4o-mini", slackWebhook: "" };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
     return raw
       ? (JSON.parse(raw) as Settings)
-      : { deepseekKey: "", slackWebhook: "" };
+      : { deepseekKey: "", openrouterKey: "", openrouterModel: "openai/gpt-4o-mini", slackWebhook: "" };
   } catch {
-    return { deepseekKey: "", slackWebhook: "" };
+    return { deepseekKey: "", openrouterKey: "", openrouterModel: "openai/gpt-4o-mini", slackWebhook: "" };
   }
 }
 
@@ -76,6 +79,8 @@ export default function Home() {
   const [showSettings, setShowSettings] = useState(false);
   const [settings, setSettings] = useState<Settings>({
     deepseekKey: "",
+    openrouterKey: "",
+    openrouterModel: "openai/gpt-4o-mini",
     slackWebhook: "",
   });
   const [banner, setBanner] = useState<string | null>(null);
@@ -135,6 +140,8 @@ export default function Home() {
           goal,
           steps,
           deepseekKey: settings.deepseekKey || undefined,
+          openrouterKey: settings.openrouterKey || undefined,
+          openrouterModel: settings.openrouterModel || undefined,
           slackWebhook: settings.slackWebhook || undefined,
         }),
       });
@@ -174,7 +181,8 @@ export default function Home() {
       setHistory(loadHistory());
 
       if (data.liveModel) {
-        setBanner("Live DeepSeek rationales active for this run.");
+        const prov = data.liveProvider === "openrouter" ? "OpenRouter" : data.liveProvider === "deepseek" ? "DeepSeek" : "live model";
+        setBanner(`Live agent rationales active (${prov}).`);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
@@ -316,10 +324,11 @@ export default function Home() {
         <p className="text-slate-400 leading-relaxed">
           Submit a goal. Agents reach consensus, score risk, auto-execute safe
           steps, and escalate dangerous ones for your sign-off.
-          {settings.deepseekKey && (
+          {(settings.openrouterKey || settings.deepseekKey) && (
             <span className="text-emerald-400/90">
               {" "}
-              Live DeepSeek key configured.
+              Live model key configured
+              {settings.openrouterKey ? " (OpenRouter)" : " (DeepSeek)"}.
             </span>
           )}
         </p>
@@ -347,7 +356,40 @@ export default function Home() {
           </p>
           <div>
             <label className="block text-xs font-medium text-slate-400 mb-1">
-              DeepSeek API key (optional — live agent rationales)
+              OpenRouter API key (optional — preferred for live agents)
+            </label>
+            <input
+              type="password"
+              value={settings.openrouterKey}
+              onChange={(e) =>
+                saveSettings({ ...settings, openrouterKey: e.target.value })
+              }
+              placeholder="sk-or-v1-..."
+              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm font-mono"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1">
+              OpenRouter model
+            </label>
+            <select
+              value={settings.openrouterModel}
+              onChange={(e) =>
+                saveSettings({ ...settings, openrouterModel: e.target.value })
+              }
+              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm"
+            >
+              <option value="openai/gpt-4o-mini">GPT-4o Mini</option>
+              <option value="openai/gpt-4o">GPT-4o</option>
+              <option value="anthropic/claude-3.5-sonnet">Claude 3.5 Sonnet</option>
+              <option value="google/gemini-flash-1.5">Gemini Flash 1.5</option>
+              <option value="deepseek/deepseek-chat">DeepSeek Chat (via OpenRouter)</option>
+              <option value="meta-llama/llama-3.1-70b-instruct">Llama 3.1 70B</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1">
+              DeepSeek API key (optional fallback)
             </label>
             <input
               type="password"
@@ -408,8 +450,8 @@ export default function Home() {
             className="rounded-lg bg-sky-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-sky-400 disabled:opacity-50 transition"
           >
             {loading
-              ? settings.deepseekKey
-                ? "Calling DeepSeek…"
+              ? settings.openrouterKey || settings.deepseekKey
+                ? "Calling live model…"
                 : "Running agents…"
               : "Run AI Dev Team"}
           </button>
@@ -481,7 +523,7 @@ export default function Home() {
             )}
             {result.liveModel && (
               <span className="rounded-full bg-violet-950 text-violet-300 px-3 py-1">
-                Live DeepSeek
+                Live {(result as RunResult & { liveProvider?: string }).liveProvider === "openrouter" ? "OpenRouter" : "DeepSeek"}
               </span>
             )}
           </div>
