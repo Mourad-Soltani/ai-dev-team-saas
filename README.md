@@ -17,6 +17,8 @@ Submit a development goal → six agents consensus → risk scored → safe step
 
 ## Features
 
+Technical deep-dive: see **[ORCHESTRATION.md](./ORCHESTRATION.md)** (agents, consensus, risk, gate, live DeepSeek).
+
 - Risk-aware escalation gate (production / auth / billing always human)
 - Approve / Reject on escalated steps
 - Free-tier daily run limits
